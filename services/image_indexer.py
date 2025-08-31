@@ -68,3 +68,19 @@ def index_image_paths(image_paths: List[str], partition: str) -> List[int]:
     return ids
 
 
+def embed_text_queries(queries: Iterable[str], model=None, processor=None, device: str = "cpu") -> np.ndarray:
+    texts = [q for q in queries if q]
+    if not texts:
+        return np.zeros((0, 512), dtype="float32")
+
+    if model is None or processor is None:
+        model, processor, device = load_image_embedding_model()
+
+    inputs = processor(text=texts, return_tensors="pt", padding=True, truncation=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model.get_text_features(**inputs)
+        vectors = outputs.cpu().numpy()
+    return vectors.astype("float32", copy=False)
+
+

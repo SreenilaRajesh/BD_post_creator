@@ -14,6 +14,7 @@ faiss-cpu==1.8.0.post1
 sentence-transformers==3.0.1
 torch>=2.1.0
 transformers==4.44.0
+gradio==4.44.0
 tools
 fitz
 frontend

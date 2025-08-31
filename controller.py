@@ -5,16 +5,27 @@ from pathlib import Path
 from typing import List
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import HTMLResponse
+from gradio.routes import mount_gradio_app
 from pydantic import BaseModel, HttpUrl
 
 from services.parse_document import parse_pdf_to_files
 from services.parse_web_url import parse_web_url_to_files
 from services.text_indexer import index_text_corpus, embed_texts
-from services.image_indexer import index_image_paths, embed_images
+from services.image_indexer import index_image_paths, embed_images, embed_text_queries
 from services.faiss_service import search_embeddings
 
 
 app = FastAPI(title="Content Parser API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # -----------------------------
@@ -93,7 +104,7 @@ class SearchTextRequest(BaseModel):
 
 
 class SearchImageRequest(BaseModel):
-    image_path: str
+    query: str
     partition: str = "web_url_images"
     top_k: int = 5
 
@@ -129,7 +140,7 @@ def search_images(payload: SearchImageRequest) -> SearchResponse:
     if payload.partition not in ALLOWED_IMAGE_PARTITIONS:
         raise HTTPException(status_code=400, detail="Invalid image partition")
 
-    query_vec = embed_images([payload.image_path])
+    query_vec = embed_text_queries([payload.query])
     results_rows = search_embeddings(payload.partition, query_vec, top_k=payload.top_k)
     row = results_rows[0] if results_rows else []
     items: List[SearchResultItem] = [
@@ -142,5 +153,18 @@ def search_images(payload: SearchImageRequest) -> SearchResponse:
 @app.get("/")
 def root() -> dict:
     return {"status": "ok", "message": "Use /parse_web_url or /parse_document"}
+
+
+# -----------------------------
+# Mount Gradio UI
+# -----------------------------
+
+try:
+    from ui.gradio_ui import build_ui
+
+    demo = build_ui()
+    app = mount_gradio_app(app, demo, path="/ui")
+except Exception:
+    pass
 
 
