@@ -297,8 +297,31 @@ try:
     from ui.gradio_ui import build_ui
 
     demo = build_ui()
-    app = mount_gradio_app(app, demo, path="/ui")
-except Exception:
-    pass
+    # Mount Gradio UI under a stable internal path
+    app = mount_gradio_app(app, demo, path="/ui-frame/")
+
+    @app.get("/ui", include_in_schema=False)
+    def _ui_host_page() -> HTMLResponse:
+        html = (
+            "<html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width, initial-scale=1'/>"
+            "<title>AIPost UI</title></head>"
+            "<body style='margin:0;padding:0;height:100vh;overflow:hidden;'>"
+            "<iframe src='/ui-frame/' style='width:100%;height:100%;border:0;'></iframe>"
+            "</body></html>"
+        )
+        return HTMLResponse(content=html)
+
+    @app.get("/ui/", include_in_schema=False)
+    def _ui_host_page_slash() -> HTMLResponse:
+        return _ui_host_page()  # same content
+
+    try:
+        # Debug: list routes on startup to verify mounts are present
+        routes = [getattr(r, "path", str(r)) for r in app.router.routes]
+        print("Mounted routes:", routes)
+    except Exception:
+        pass
+except Exception as exc:
+    print(f"Failed to mount Gradio UI: {exc}")
 
 

@@ -74,10 +74,19 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="AIPost") as demo:
         gr.Markdown("# **AIPost**")
         gr.Markdown("## Build your content with AI")
+        gr.HTML(
+            """
+            <style>
+              .modal-50 { width: 50vw; margin: 5vh auto; background: #ffffff; padding: 16px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); }
+              body { background-color: #f5f7fb; }
+              .text-panel { border: 1px solid rgba(0,0,0,.15); border-radius: 8px; padding: 12px; min-height: 300px; max-height: 60vh; overflow-y: auto; }
+            </style>
+            """
+        )
 
         start_btn = gr.Button("Start Building!", variant="primary")
 
-        with gr.Group(visible=False) as modal:
+        with gr.Group(visible=False, elem_classes=["modal-50"]) as modal:
             images_state = gr.State([])
             text_state = gr.State("")
             with gr.Column(visible=True) as step1:
@@ -251,29 +260,31 @@ def build_ui() -> gr.Blocks:
 
         # Extend flow: After finishing step3, go to Review (Step 4) with slideshow tools
         with gr.Column(visible=False) as step4:
-            gr.Markdown("### Step 4: Review & Modify - Slideshow/Post Series")
-            gr.Markdown("Reorder images and edit your post text.")
+            gr.Markdown("### Step 4: Review - Slideshow/Post Series")
+            gr.Markdown("Preview selected images before final preview.")
             gallery = gr.Gallery(label="Slides", value=[], columns=4, height=200)
-            select_idx = gr.Dropdown(label="Select slide index", choices=[], value=None)
-            with gr.Row():
-                move_up_btn = gr.Button("Move Up")
-                move_down_btn = gr.Button("Move Down")
-            post_text = gr.Textbox(label="Post text", lines=8, placeholder="Edit your LinkedIn post here...")
-            save_text_btn = gr.Button("Save Text")
             with gr.Row():
                 step4_back_btn = gr.Button("Back")
                 step4_next_btn = gr.Button("Next", variant="primary")
 
-        with gr.Column(visible=False) as step5:
-            gr.Markdown("### Step 5: Preview & Download")
-            preview_gallery = gr.Gallery(label="Preview", value=[], columns=3, height=240)
-            preview_text = gr.Markdown("")
-            download_file = gr.File(label="Download composed post (ZIP)")
+        # Final preview panel with close (via hiding group) instead of Modal (compatibility)
+        current_idx_state = gr.State(0)
+        with gr.Group(visible=False, elem_classes=["modal-50"]) as preview_modal:
             with gr.Row():
-                step5_back_btn = gr.Button("Back")
-                step5_finish_btn = gr.Button("Finish", variant="primary")
+                with gr.Column(scale=3):
+                    with gr.Row():
+                        prev_btn = gr.Button("◀")
+                        next_btn = gr.Button("▶")
+                        close_btn = gr.Button("✖ Close", variant="stop")
+                    preview_image = gr.Image(label="Slides", interactive=False)
+                with gr.Column(scale=2):
+                    with gr.Group(elem_classes=["text-panel"]):
+                        preview_text_md = gr.Markdown("")
+            with gr.Row():
+                download_all_btn = gr.Button("Download all (ZIP)")
+            download_zip_file = gr.File(label="ZIP of slides")
 
-        def on_step3_finish(choice: str, image_path: str, prompt: str, current_images: list):
+        def on_step3_finish(choice: str, image_path: str, prompt: str, current_images: list, current_text: str):
             new_images = list(current_images or [])
             try:
                 if choice == "Upload Image":
@@ -345,13 +356,20 @@ def build_ui() -> gr.Blocks:
                     pass
 
             # Prepare Step 4 UI values
-            choices = [str(i + 1) for i in range(len(new_images))]
+            # Deduplicate while preserving order
+            seen = set()
+            deduped = []
+            for p in new_images:
+                if p and p not in seen:
+                    seen.add(p)
+                    deduped.append(p)
+            new_images = deduped
+            # No reordering in Step 4; just show images
             return (
                 gr.update(visible=False),
                 gr.update(visible=True),
                 new_images,
                 gr.update(value=new_images),
-                gr.update(choices=choices, value=(choices[-1] if choices else None)),
             )
 
         def on_step3_back():
@@ -360,55 +378,74 @@ def build_ui() -> gr.Blocks:
         step3_back_btn.click(on_step3_back, inputs=None, outputs=[step3, step2])
         step3_finish_btn.click(
             on_step3_finish,
-            inputs=[img_option, image_uploader, prompt_tb, images_state],
-            outputs=[step3, step4, images_state, gallery, select_idx],
+            inputs=[img_option, image_uploader, prompt_tb, images_state, text_state],
+            outputs=[step3, step4, images_state, gallery],
         )
 
-        # Step 4 helpers
-        def move_image(images: list, index_str: str, direction: str):
-            arr = list(images or [])
-            if not arr or not index_str:
-                return arr, gr.update(value=arr), gr.update(choices=[str(i + 1) for i in range(len(arr))], value=(index_str or None))
-            idx = int(index_str) - 1
-            if idx < 0 or idx >= len(arr):
-                return arr, gr.update(value=arr), gr.update(choices=[str(i + 1) for i in range(len(arr))], value=index_str)
-            new_idx = idx - 1 if direction == "up" else idx + 1
-            if 0 <= new_idx < len(arr):
-                arr[idx], arr[new_idx] = arr[new_idx], arr[idx]
-            choices = [str(i + 1) for i in range(len(arr))]
-            return arr, gr.update(value=arr), gr.update(choices=choices, value=str(new_idx + 1))
-
-        move_up_btn.click(lambda imgs, idx: move_image(imgs, idx, "up"), inputs=[images_state, select_idx], outputs=[images_state, gallery, select_idx])
-        move_down_btn.click(lambda imgs, idx: move_image(imgs, idx, "down"), inputs=[images_state, select_idx], outputs=[images_state, gallery, select_idx])
-
-        def save_text(text: str):
-            try:
-                gr.Info("Text saved.")
-            except Exception:
-                pass
-            return text
-        save_text_btn.click(save_text, inputs=post_text, outputs=text_state)
+        # Step 4 has no editing controls now
 
         def on_step4_back():
             return gr.update(visible=False), gr.update(visible=True)
         step4_back_btn.click(on_step4_back, inputs=None, outputs=[step4, step3])
 
         def on_step4_next(images: list, text: str):
+            imgs = []
+            seen = set()
+            for p in images or []:
+                if p and p not in seen:
+                    seen.add(p)
+                    imgs.append(p)
+            first_img = imgs[0] if imgs else None
             md = f"### Post Preview\n\n{text}" if text else ""
-            return gr.update(visible=False), gr.update(visible=True), gr.update(value=images or []), gr.update(value=md)
-        step4_next_btn.click(on_step4_next, inputs=[images_state, text_state], outputs=[step4, step5, preview_gallery, preview_text])
+            return (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                0,
+                gr.update(value=first_img),
+                gr.update(value=md),
+            )
+        step4_next_btn.click(
+            on_step4_next,
+            inputs=[images_state, text_state],
+            outputs=[step4, preview_modal, current_idx_state, preview_image, preview_text_md],
+        )
 
-        # Step 5
-        def on_step5_back():
-            return gr.update(visible=False), gr.update(visible=True)
-        step5_back_btn.click(on_step5_back, inputs=None, outputs=[step5, step4])
+        def on_close_preview():
+            return (
+                gr.update(visible=False),  # preview modal hidden
+                gr.update(visible=False),  # main modal hidden
+                [],                        # reset images_state
+                "",                        # reset text_state
+                gr.update(visible=True),   # step1 visible when reopened
+                gr.update(visible=False),  # step2 hidden
+                gr.update(visible=False),  # step3 hidden
+                gr.update(visible=False),  # step4 hidden
+            )
+        close_btn.click(
+            on_close_preview,
+            inputs=None,
+            outputs=[preview_modal, modal, images_state, text_state, step1, step2, step3, step4],
+        )
 
+        # Preview navigation
+        def show_prev(images: list, idx: int):
+            if not images:
+                return 0, gr.update(value=None)
+            idx = (idx - 1) % len(images)
+            return idx, gr.update(value=images[idx])
+
+        def show_next(images: list, idx: int):
+            if not images:
+                return 0, gr.update(value=None)
+            idx = (idx + 1) % len(images)
+            return idx, gr.update(value=images[idx])
+
+        prev_btn.click(show_prev, inputs=[images_state, current_idx_state], outputs=[current_idx_state, preview_image])
+        next_btn.click(show_next, inputs=[images_state, current_idx_state], outputs=[current_idx_state, preview_image])
+
+        # Downloads
         def make_zip(images: list):
             if not images:
-                try:
-                    gr.Warning("No images to download.")
-                except Exception:
-                    pass
                 return None
             downloads_dir = Path(__file__).resolve().parent.parent / "downloads"
             downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -423,7 +460,10 @@ def build_ui() -> gr.Blocks:
                     except Exception:
                         continue
             return str(zip_path)
-        step5_finish_btn.click(make_zip, inputs=images_state, outputs=download_file)
+
+        download_all_btn.click(make_zip, inputs=images_state, outputs=download_zip_file)
+
+        # Step 5 section removed; preview handled by modal
 
     return demo
 
