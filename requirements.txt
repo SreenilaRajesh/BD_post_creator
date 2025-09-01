@@ -9,12 +9,14 @@ PyMuPDF==1.24.10
 pydantic==2.8.2
 langchain==0.2.15
 langchain-community==0.2.12
-duckduckgo-search==6.2.11
 faiss-cpu==1.8.0.post1
 sentence-transformers==3.0.1
 torch>=2.1.0
 transformers==4.44.0
 gradio==4.44.0
+diffusers==0.30.2
+accelerate==0.34.2
+safetensors==0.4.4
 tools
 fitz
 frontend

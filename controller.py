@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +15,8 @@ from services.parse_web_url import parse_web_url_to_files
 from services.text_indexer import index_text_corpus, embed_texts
 from services.image_indexer import index_image_paths, embed_images, embed_text_queries
 from services.faiss_service import search_embeddings
+from services.image_generation import generate_image
+from services.generate_text import generate_linkedin_post
 
 
 app = FastAPI(title="Content Parser API", version="1.0.0")
@@ -66,6 +68,8 @@ def parse_web_url(payload: ParseWebUrlRequest) -> ParseWebUrlResponse:
         text_ids = index_text_corpus(text_content, partition="web_url_text")
         image_ids = index_image_paths(image_files, partition="web_url_images")
         print(f"Indexed web_url_text: {len(text_ids)} items; web_url_images: {len(image_ids)} items")
+        SESSION_TEXT_PARTITIONS.add("web_url_text")
+        SESSION_IMAGE_PARTITIONS.add("web_url_images")
     except Exception as exc:
         print(f"Indexing error (web): {exc}")
 
@@ -82,6 +86,8 @@ def parse_document(payload: ParseDocumentRequest) -> ParseDocumentResponse:
         text_ids = index_text_corpus(text_content, partition="doc_text")
         image_ids = index_image_paths(image_files, partition="doc_images")
         print(f"Indexed doc_text: {len(text_ids)} items; doc_images: {len(image_ids)} items")
+        SESSION_TEXT_PARTITIONS.add("doc_text")
+        SESSION_IMAGE_PARTITIONS.add("doc_images")
     except Exception as exc:
         print(f"Indexing error (doc): {exc}")
 
@@ -96,16 +102,20 @@ def parse_document(payload: ParseDocumentRequest) -> ParseDocumentResponse:
 ALLOWED_TEXT_PARTITIONS = {"web_url_text", "doc_text"}
 ALLOWED_IMAGE_PARTITIONS = {"web_url_images", "doc_images"}
 
+# Track which text partitions were indexed in this server session
+SESSION_TEXT_PARTITIONS: set[str] = set()
+SESSION_IMAGE_PARTITIONS: set[str] = set()
+
 
 class SearchTextRequest(BaseModel):
     query: str
-    partition: str = "web_url_text"
+    partition: Optional[str] = None
     top_k: int = 5
 
 
 class SearchImageRequest(BaseModel):
     query: str
-    partition: str = "web_url_images"
+    partition: Optional[str] = None
     top_k: int = 5
 
 
@@ -121,31 +131,155 @@ class SearchResponse(BaseModel):
 
 @app.post("/search_text", response_model=SearchResponse)
 def search_text(payload: SearchTextRequest) -> SearchResponse:
-    if payload.partition not in ALLOWED_TEXT_PARTITIONS:
-        raise HTTPException(status_code=400, detail="Invalid text partition")
-
     query_vec = embed_texts([payload.query])
-    results_rows = search_embeddings(payload.partition, query_vec, top_k=payload.top_k)
-    # Single query -> one row
-    row = results_rows[0] if results_rows else []
-    items: List[SearchResultItem] = [
+
+    if payload.partition:
+        if payload.partition not in ALLOWED_TEXT_PARTITIONS:
+            raise HTTPException(status_code=400, detail="Invalid text partition")
+        results_rows = search_embeddings(payload.partition, query_vec, top_k=payload.top_k)
+        row = results_rows[0] if results_rows else []
+        items: List[SearchResultItem] = [
+            SearchResultItem(id=_id, score=score, payload=payload_str)
+            for _id, score, payload_str in row
+        ]
+        return SearchResponse(results=items)
+
+    if not SESSION_TEXT_PARTITIONS:
+        raise HTTPException(status_code=400, detail="No indexed content in this session")
+
+    aggregated: List[tuple[float, int, str]] = []
+    for part in SESSION_TEXT_PARTITIONS:
+        try:
+            rows = search_embeddings(part, query_vec, top_k=payload.top_k)
+            row = rows[0] if rows else []
+            for _id, score, payload_str in row:
+                aggregated.append((float(score), int(_id), payload_str))
+        except Exception:
+            continue
+
+    aggregated.sort(key=lambda x: x[0], reverse=True)
+    aggregated = aggregated[: payload.top_k]
+
+    items = [
         SearchResultItem(id=_id, score=score, payload=payload_str)
-        for _id, score, payload_str in row
+        for score, _id, payload_str in aggregated
     ]
     return SearchResponse(results=items)
 
 
+# -----------------------------
+# Image Generation API
+# -----------------------------
+
+
+class GenerateImageRequest(BaseModel):
+    prompt: str
+    num_inference_steps: int = 25
+    guidance_scale: float = 7.5
+    seed: int | None = None
+
+
+class GenerateImageResponse(BaseModel):
+    image_path: str
+
+
+@app.post("/generate_image", response_model=GenerateImageResponse)
+def generate_image_api(payload: GenerateImageRequest) -> GenerateImageResponse:
+    try:
+        out_path = generate_image(
+            prompt=payload.prompt,
+            num_inference_steps=payload.num_inference_steps,
+            guidance_scale=payload.guidance_scale,
+            seed=payload.seed,
+        )
+        return GenerateImageResponse(image_path=out_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Image generation failed: {exc}")
+
+
+# -----------------------------
+# Text Generation API (Ollama)
+# -----------------------------
+
+
+class GenerateTextRequest(BaseModel):
+    prompt: str
+    max_tokens: int = 400
+
+
+class GenerateTextResponse(BaseModel):
+    content: str
+
+
+@app.post("/generate_text", response_model=GenerateTextResponse)
+def generate_text_api(payload: GenerateTextRequest) -> GenerateTextResponse:
+    try:
+        content = generate_linkedin_post(prompt=payload.prompt, max_tokens=payload.max_tokens)
+        return GenerateTextResponse(content=content)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Text generation failed: {exc}")
+
+
+class StoreImageRequest(BaseModel):
+    file_path: str
+
+
+class StoreImageResponse(BaseModel):
+    saved_path: str
+
+
+@app.post("/store_uploaded_image", response_model=StoreImageResponse)
+def store_uploaded_image(payload: StoreImageRequest) -> StoreImageResponse:
+    src = Path(payload.file_path).expanduser().resolve()
+    if not src.exists() or not src.is_file():
+        raise HTTPException(status_code=400, detail="File does not exist or is not a file")
+
+    dest_dir = Path(__file__).resolve().parent / "uploaded_images"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    shutil.copy2(src, dest)
+    return StoreImageResponse(saved_path=str(dest.resolve()))
+
+
 @app.post("/search_images", response_model=SearchResponse)
 def search_images(payload: SearchImageRequest) -> SearchResponse:
-    if payload.partition not in ALLOWED_IMAGE_PARTITIONS:
-        raise HTTPException(status_code=400, detail="Invalid image partition")
-
     query_vec = embed_text_queries([payload.query])
-    results_rows = search_embeddings(payload.partition, query_vec, top_k=payload.top_k)
-    row = results_rows[0] if results_rows else []
-    items: List[SearchResultItem] = [
+
+    if payload.partition:
+        if payload.partition not in ALLOWED_IMAGE_PARTITIONS:
+            raise HTTPException(status_code=400, detail="Invalid image partition")
+        results_rows = search_embeddings(payload.partition, query_vec, top_k=payload.top_k)
+        row = results_rows[0] if results_rows else []
+        items: List[SearchResultItem] = [
+            SearchResultItem(id=_id, score=score, payload=payload_str)
+            for _id, score, payload_str in row
+        ]
+        return SearchResponse(results=items)
+
+    # If not provided, require session-based image partitions (latest indexed during this process)
+    if not SESSION_IMAGE_PARTITIONS:
+        raise HTTPException(status_code=400, detail="No indexed images in this session")
+
+    aggregated: List[tuple[float, int, str]] = []
+    for part in SESSION_IMAGE_PARTITIONS:
+        try:
+            rows = search_embeddings(part, query_vec, top_k=payload.top_k)
+            row = rows[0] if rows else []
+            for _id, score, payload_str in row:
+                aggregated.append((float(score), int(_id), payload_str))
+        except Exception:
+            continue
+
+    aggregated.sort(key=lambda x: x[0], reverse=True)
+    aggregated = aggregated[: payload.top_k]
+
+    items = [
         SearchResultItem(id=_id, score=score, payload=payload_str)
-        for _id, score, payload_str in row
+        for score, _id, payload_str in aggregated
     ]
     return SearchResponse(results=items)
 
